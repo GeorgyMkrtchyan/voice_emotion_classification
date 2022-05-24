@@ -292,14 +292,13 @@ class CustomDataset(Dataset):
             offset = self.sampling_rate - sound_1d_array.size 
             sound_1d_array = np.pad(sound_1d_array, (0, offset))
                 
-        if self.game_context is not None:
-            ctx=get_context_vector(item[2],self.game_context)
-            x=torch.from_numpy(np.concatenate([sound_1d_array,ctx],axis=0)).unsqueeze(0)
-        else:
-            x=torch.from_numpy(sound_1d_array).unsqueeze(0)
-                
+        x = torch.from_numpy(sound_1d_array).unsqueeze(0)     
         y = create_onehot_tensor(item[1])
-
+        
+        if self.game_context is not None:
+            ctx = torch.from_numpy(get_context_vector(item[2],self.game_context)).float()
+            return x, ctx, y
+        
         return x,y
 
 
@@ -349,8 +348,9 @@ def get_data(data_list,game_context=False):
 
     sampling_rate = 22050*3
         
-    x_tensors = []
-    y_tensors = []
+    X = []
+    Y = []
+    ctx_ = []
         
     for item in data_list:
             
@@ -358,17 +358,17 @@ def get_data(data_list,game_context=False):
             if sound_1d_array.size<sampling_rate:
                 offset = sampling_rate - sound_1d_array.size 
                 sound_1d_array = np.pad(sound_1d_array, (0, offset))
-                
-            if game_context:
-                ctx=get_context_vector(item[2])
-                x_tensors.append(np.concatenate([sound_1d_array,ctx],axis=0))
-            else:
-                x_tensors.append(sound_1d_array)
-                
-            y_onehot = create_onehot_tensor(item[1]).numpy()
-            y_tensors.append(y_onehot)
 
-    return np.array(x_tensors), np.array(y_tensors)
+            X.append(sound_1d_array)
+            y_onehot = create_onehot_tensor(item[1]).numpy()
+            Y.append(y_onehot)
+            if game_context is not None:
+                ctx_.append(get_context_vector(item[2]))
+                
+    if game_context is not None:
+        return np.array(X), np.array(ctx_), np.array(Y)
+    
+    return np.array(X), np.array(Y)
 
 def get_train_test(file_path,path_to_audio,path_to_splitted_audio,test_size,use_game_context=False):
     
