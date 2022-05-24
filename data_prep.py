@@ -375,13 +375,18 @@ def get_train_test(file_path,path_to_audio,path_to_splitted_audio,test_size,use_
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
     if use_game_context:
         game_context=get_game_context()
+        print('Prepate train dataset')
+        x_train, ctx_train, y_train = get_data(train_list,game_context=game_context)
+        print('Prepate test dataset')
+        x_test,ctx_test, y_test = get_data(val_list,game_context=game_context)
+        return x_train,ctx_train,y_train,x_test,ctx_test,y_test
     else:
         game_context = None
-    print('Prepate train dataset')
-    x_train,y_train = get_data(train_list,game_context=game_context)
-    print('Prepate test dataset')
-    x_test,y_test = get_data(val_list,game_context=game_context)
-    return x_train,y_train,x_test,y_test
+        print('Prepate train dataset')
+        x_train,y_train = get_data(train_list,game_context=game_context)
+        print('Prepate test dataset')
+        x_test,y_test = get_data(val_list,game_context=game_context)
+        return x_train,y_train,x_test,y_test
 
 
 
