@@ -12,6 +12,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 import torch
 import time
+from functools import lru_cache
 
 import demo_analysis_new
 
@@ -38,6 +39,7 @@ emotion_with_keys={
 }
 
 
+@lru_cache(None)
 def get_match_info(n_match):
     if n_match == 1:
         parsed_demo = './demos/3248aa5e-b344-40f5-8f83-4988a3b7141b_de_vertigo_128.csv'
@@ -66,6 +68,7 @@ def get_players(n_match):
     
     return players
 
+@lru_cache(None)
 def get_game_context():
     game_context={}
     for n_match in range(1,5):
@@ -106,6 +109,7 @@ def split_audio(path_to_audio,path_to_splitted_audio):
                         cut.export(path_to_splitted_audio+'/'+player_number+'_'+name[:-4]+ f'_{i}_{i+3000}.wav', format="wav")
                     i+=3000
 
+@lru_cache(None)
 def get_dict_with_emotions(file_path): #keys: match -> n_round -> num_player value: dataframe
     all_emt_dict={}
     col_emt_names=["start", "end", "emt_est_1", "str_emt_est_1", "emt_est_2", "str_emt_est_2", "emt_est_3", "str_emt_est_3"]
@@ -214,9 +218,10 @@ def create_onehot_tensor(label):
     return y_onehot
 
 
-def get_context_vector(info,game_context):
+@lru_cache(None)
+def get_context_vector(n_player,n_match,n_round,start_time):
+    game_context = get_game_context()
     context_vector = np.zeros(12)
-    n_player,n_match,n_round,start_time = info
     bomb_interaction_events=['bomb_pickup','bomb_beginplant','bomb_planted','bomb_exploded','bomb_begindefuse','bomb_defused','bomb_abortplant']
     if n_round>=2:
         end_time = game_context[n_match][n_round-2].iloc[-1].ms
@@ -278,10 +283,18 @@ def get_context_vector(info,game_context):
 
 class CustomDataset(Dataset):
 
-    def __init__(self, data_list,game_context):
+    def __init__(self, data_list,use_game_context):
         self.data_list = data_list
-        self.game_context = game_context
+        self.use_game_context = bool(use_game_context)
         self.sampling_rate = 22050*3
+
+        if self.use_game_context:
+            print("Preparing game context vectors")
+            start = time.time()
+            for item in self.data_list:
+                get_context_vector(*item[2])
+            print(f"Finished in {(time.time() - start)/60:.2f} minutes")
+
     def __len__(self):
         return len(self.data_list)
   
@@ -295,19 +308,22 @@ class CustomDataset(Dataset):
         x = torch.from_numpy(sound_1d_array).unsqueeze(0)     
         y = create_onehot_tensor(item[1])
         
-        if self.game_context is not None:
-            ctx = torch.from_numpy(get_context_vector(item[2],self.game_context)).float()
+        if self.use_game_context:
+            ctx = torch.from_numpy(get_context_vector(*item[2])).float()
             return x, ctx, y
         
         return x,y
 
 
+@lru_cache(None)
 def prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size):
-    print('Start splitting audio to ',path_to_splitted_audio)
     if not os.path.exists(path_to_splitted_audio):
+        print('Start splitting audio to ',path_to_splitted_audio)
         os.makedirs(path_to_splitted_audio)
-    split_audio(path_to_audio,path_to_splitted_audio)
-    print('Finish splitting\n')
+        split_audio(path_to_audio,path_to_splitted_audio)
+        print('Finish splitting\n')
+    else:
+        print(f"{path_to_splitted_audio} exists; skip splitting")
     full_dict_with_emt = convert_dict(get_dict_with_emotions(file_path))
     print('Emotion statistic:')
     display_emt(full_dict_with_emt)
@@ -324,14 +340,10 @@ def prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size):
 def get_dataloader(file_path,path_to_audio,path_to_splitted_audio,test_size,use_game_context=False,batch_size=32):
   
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
-    if use_game_context:
-        game_context=get_game_context()
-    else:
-        game_context = None
     print('\nPrepate train dataset')
-    train_dataset = CustomDataset(train_list,game_context=game_context)
+    train_dataset = CustomDataset(train_list,use_game_context=use_game_context)
     print('Prepate val dataset')
-    val_dataset = CustomDataset(val_list,game_context=game_context)
+    val_dataset = CustomDataset(val_list,use_game_context=use_game_context)
 
     train_dataloader=DataLoader(
                 train_dataset, batch_size=batch_size,
@@ -344,7 +356,7 @@ def get_dataloader(file_path,path_to_audio,path_to_splitted_audio,test_size,use_
     return train_dataloader,val_dataloader
 
 #for ML methods
-def get_data(data_list,game_context=False):
+def get_data(data_list,use_game_context):
 
     sampling_rate = 22050*3
         
@@ -362,10 +374,10 @@ def get_data(data_list,game_context=False):
             X.append(sound_1d_array)
             y_onehot = create_onehot_tensor(item[1]).numpy()
             Y.append(y_onehot)
-            if game_context is not None:
-                ctx_.append(get_context_vector(item[2]))
+            if use_game_context:
+                ctx_.append(get_context_vector(*item[2]))
                 
-    if game_context is not None:
+    if use_game_context:
         return np.array(X), np.array(ctx_), np.array(Y)
     
     return np.array(X), np.array(Y)
@@ -374,18 +386,16 @@ def get_train_test(file_path,path_to_audio,path_to_splitted_audio,test_size,use_
     
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
     if use_game_context:
-        game_context=get_game_context()
         print('Prepate train dataset')
-        x_train, ctx_train, y_train = get_data(train_list,game_context=game_context)
+        x_train, ctx_train, y_train = get_data(train_list,use_game_context=use_game_context)
         print('Prepate test dataset')
-        x_test,ctx_test, y_test = get_data(val_list,game_context=game_context)
+        x_test,ctx_test, y_test = get_data(val_list,use_game_context=use_game_context)
         return x_train,ctx_train,y_train,x_test,ctx_test,y_test
     else:
-        game_context = None
         print('Prepate train dataset')
-        x_train,y_train = get_data(train_list,game_context=game_context)
+        x_train,y_train = get_data(train_list,use_game_context=use_game_context)
         print('Prepate test dataset')
-        x_test,y_test = get_data(val_list,game_context=game_context)
+        x_test,y_test = get_data(val_list,use_game_context=use_game_context)
         return x_train,y_train,x_test,y_test
 
 
