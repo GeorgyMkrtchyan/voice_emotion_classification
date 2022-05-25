@@ -12,10 +12,11 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 import torch
 import time
+from functools import lru_cache
+import json
+from tqdm.notebook import tqdm
 
-import demo_analysis_new
-
-NUM_WORKERS=2
+from . import demo_analysis_new
 
 import platform
 path_delim = '\\' if platform.system() == 'Windows' else '/'
@@ -43,6 +44,7 @@ emotion_with_keys={
 }
 
 
+@lru_cache(None)
 def get_match_info(n_match):
     if n_match == 1:
         parsed_demo = './demos/3248aa5e-b344-40f5-8f83-4988a3b7141b_de_vertigo_128.csv'
@@ -71,6 +73,7 @@ def get_players(n_match):
     
     return players
 
+@lru_cache(None)
 def get_game_context():
     game_context={}
     for n_match, _ in match_len.items():
@@ -111,6 +114,7 @@ def split_audio(path_to_audio,path_to_splitted_audio):
                         cut.export(path_to_splitted_audio+path_delim+player_number+'_'+name[:-4]+ f'_{i}_{i+3000}.wav', format="wav")
                     i+=3000
 
+@lru_cache(None)
 def get_dict_with_emotions(file_path): #keys: match -> n_round -> num_player value: dataframe
     all_emt_dict={}
     col_emt_names=["start", "end", "emt_est_1", "str_emt_est_1", "emt_est_2", "str_emt_est_2", "emt_est_3", "str_emt_est_3"]
@@ -226,9 +230,10 @@ def create_onehot_tensor(label):
     return y_onehot
 
 
-def get_context_vector(info,game_context):
+@lru_cache(None)
+def get_context_vector(n_player,n_match,n_round,start_time):
+    game_context = get_game_context()
     context_vector = np.zeros(12)
-    n_player,n_match,n_round,start_time = info
     bomb_interaction_events=['bomb_pickup','bomb_beginplant','bomb_planted','bomb_exploded','bomb_begindefuse','bomb_defused','bomb_abortplant']
     if n_round>=2:
         end_time = game_context[n_match][n_round-2].iloc[-1].ms
@@ -288,75 +293,102 @@ def get_context_vector(info,game_context):
 
 
 
-class CustomDataset(Dataset):
+class BaseCustomDataset(Dataset):
 
-    def __init__(self, data_list,game_context):
+    def __init__(self, data_list,use_game_context, **ignored_kwargs):
         self.data_list = data_list
-        self.game_context = game_context
-        self.sampling_rate = 22050*3
+        self.use_game_context = bool(use_game_context)
+        self.sampling_rate = 22050
+
+        if self.use_game_context:
+            print("Preparing game context vectors")
+            start = time.time()
+            for _, _, info in tqdm(self.data_list):
+                get_context_vector(*info)
+            print(f"Finished in {(time.time() - start)/60:.2f} minutes")
+
     def __len__(self):
         return len(self.data_list)
   
+    @staticmethod
+    def load_wav(path):
+        sound_1d_array, sr = librosa.load(path) # load audio to 1d array
+        if sound_1d_array.shape[-1] < sr*3:
+            offset = sr*3 - sound_1d_array.shape[-1] 
+            sound_1d_array = np.pad(sound_1d_array, (0, offset)) 
+        return sound_1d_array  
+
+    def extract_features(self, path):
+        x = self.load_wav(path)
+        return torch.tensor(x)
+
     def __getitem__(self, index):
         item=self.data_list[index]
-        sound_1d_array,_ = librosa.load(item[0]) # load audio to 1d array
-        if sound_1d_array.size<self.sampling_rate:
-            offset = self.sampling_rate - sound_1d_array.size 
-            sound_1d_array = np.pad(sound_1d_array, (0, offset))
-                
-        x = torch.from_numpy(sound_1d_array).unsqueeze(0)     
-        y = create_onehot_tensor(item[1])
+        x = self.extract_features(item[0])
+        y = item[1] - 1
         
-        if self.game_context is not None:
-            ctx = torch.from_numpy(get_context_vector(item[2],self.game_context)).float()
-            return x, ctx, y
-        
-        return x,y
+        if self.use_game_context:
+            ctx = torch.from_numpy(get_context_vector(*item[2])).float()
+        else:
+            ctx = torch.tensor([])
+        return x, ctx, y
 
 
 def prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size):
-    print('Start splitting audio to ',path_to_splitted_audio)
     if not os.path.exists(path_to_splitted_audio):
+        print('Start splitting audio to ',path_to_splitted_audio)
         os.makedirs(path_to_splitted_audio)
-    split_audio(path_to_audio,path_to_splitted_audio)
-    print('Finish splitting\n')
-    full_dict_with_emt = convert_dict(get_dict_with_emotions(file_path))
-    print('Emotion statistic:')
-    display_emt(full_dict_with_emt)
-    print('\nPrepare train and val lists')
-    start = time.time()
-    train_list, val_list = split_annotations(full_dict_with_emt,path_to_splitted_audio,test_size)
-    print("It took: ", round((time.time()-start)/60,2)," minutes")
-    print ('train size: ', len(train_list))
-    print ('val size: ', len(val_list))
+        split_audio(path_to_audio,path_to_splitted_audio)
+        print('Finish splitting\n')
+    else:
+        print(f"{path_to_splitted_audio} exists; skip splitting")
+    try:
+        with open("prepared.json", "r") as file:
+            train_list, val_list = json.load(file)
+    except:
+        full_dict_with_emt = convert_dict(get_dict_with_emotions(file_path))
+        print('Emotion statistic:')
+        display_emt(full_dict_with_emt)
+        print('\nPrepare train and val lists')
+        start = time.time()
+        train_list, val_list = split_annotations(full_dict_with_emt,path_to_splitted_audio,test_size)
+        print("It took: ", round((time.time()-start)/60,2)," minutes")
+        print ('train size: ', len(train_list))
+        print ('val size: ', len(val_list))
+        try:
+            with open("prepared.json", "w") as file:
+                json.dump([train_list, val_list], file)
+        except: print("pff")
+       
     return train_list, val_list
 
 
 
-def get_dataloader(file_path,path_to_audio,path_to_splitted_audio,test_size,use_game_context=False,batch_size=32):
+def get_dataloader(file_path, path_to_audio, path_to_splitted_audio,
+                   test_size,
+                   use_game_context=False,
+                   batch_size=32,
+                   DatasetClass=BaseCustomDataset,
+                   num_workers=2):
   
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
-    if use_game_context:
-        game_context=get_game_context()
-    else:
-        game_context = None
     print('\nPrepate train dataset')
-    train_dataset = CustomDataset(train_list,game_context=game_context)
+    train_dataset = DatasetClass(train_list,use_game_context=use_game_context, num_workers=num_workers)
     print('Prepate val dataset')
-    val_dataset = CustomDataset(val_list,game_context=game_context)
+    val_dataset = DatasetClass(val_list,use_game_context=use_game_context, num_workers=num_workers)
 
     train_dataloader=DataLoader(
                 train_dataset, batch_size=batch_size,
-                num_workers=NUM_WORKERS, shuffle=True,pin_memory=True)
+                num_workers=num_workers, shuffle=True,pin_memory=True)
 
     val_dataloader=DataLoader(
                 val_dataset, batch_size=batch_size,
-                num_workers=NUM_WORKERS, shuffle=False,pin_memory=True)
+                num_workers=num_workers, shuffle=False,pin_memory=True)
 
     return train_dataloader,val_dataloader
 
 #for ML methods
-def get_data(data_list,game_context=None):
+def get_data(data_list,use_game_context):
 
     sampling_rate = 22050*3
         
@@ -374,10 +406,10 @@ def get_data(data_list,game_context=None):
             X.append(sound_1d_array)
             y_onehot = create_onehot_tensor(item[1]).numpy()
             Y.append(y_onehot)
-            if game_context is not None:
-                ctx_.append(get_context_vector(item[2],game_context))
+            if use_game_context:
+                ctx_.append(get_context_vector(*item[2]))
                 
-    if game_context is not None:
+    if use_game_context:
         return np.array(X), np.array(ctx_), np.array(Y)
     
     return np.array(X), np.array(Y)
@@ -386,15 +418,14 @@ def get_train_test(file_path,path_to_audio,path_to_splitted_audio,test_size,use_
     
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
     if use_game_context:
-        game_context=get_game_context()
         print('Prepate train dataset')
-        x_train, ctx_train, y_train = get_data(train_list,game_context=game_context)
+        x_train, ctx_train, y_train = get_data(train_list,use_game_context=use_game_context)
         print('Prepate test dataset')
-        x_test,ctx_test, y_test = get_data(val_list,game_context=game_context)
+        x_test,ctx_test, y_test = get_data(val_list,use_game_context=use_game_context)
         return x_train,ctx_train,y_train,x_test,ctx_test,y_test
     else:
         print('Prepate train dataset')
-        x_train,y_train = get_data(train_list)
+        x_train,y_train = get_data(train_list,use_game_context=use_game_context)
         print('Prepate test dataset')
-        x_test,y_test = get_data(val_list)
+        x_test,y_test = get_data(val_list,use_game_context=use_game_context)
         return x_train,y_train,x_test,y_test

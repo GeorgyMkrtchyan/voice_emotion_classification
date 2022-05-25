@@ -127,3 +127,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Data
+LCB_*.zip
+LCB_*/
+demos/
+logs/
+*.npz
+*.json
+*.txt
