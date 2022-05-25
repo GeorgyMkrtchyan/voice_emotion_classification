@@ -17,6 +17,11 @@ import demo_analysis_new
 
 NUM_WORKERS=2
 
+import platform
+path_delim = '\\' if platform.system() == 'Windows' else '/'
+
+amt_of_players = 10
+
 match_len={
     1:4,
     2:27,
@@ -68,7 +73,7 @@ def get_players(n_match):
 
 def get_game_context():
     game_context={}
-    for n_match in range(1,5):
+    for n_match, _ in match_len.items():
         rounds_list = get_match_info(n_match)
         rounds={}
         players=get_players(n_match)
@@ -89,36 +94,42 @@ def get_game_context():
 def split_audio(path_to_audio,path_to_splitted_audio):
     for path in pathlib.Path(path_to_audio).iterdir():
         if path.is_dir():
-            player_number = str(path)[str(path).rfind('/')+1:].split('_')[0]
+            player_number = str(path)[str(path).rfind(path_delim)+1:].split('_')[0]
             for path_in in pathlib.Path(path).iterdir():
                 str_path = str(path_in)
-                name = str_path[str_path.rfind('/')+1:]
+                name = str_path[str_path.rfind(path_delim)+1:]
                 sound = AudioSegment.from_wav(path_in)
                 i=0
                 while i<=len(sound):
                     if i+3000>len(sound):
                         cut = sound[i:len(sound)+1]
-                        if not os.path.exists(path_to_splitted_audio+'/'+player_number+'_'+name[:-4]+ f'_{i}_{len(sound)}.wav'):
-                            cut.export(path_to_splitted_audio+'/'+player_number+'_'+name[:-4]+ f'_{i}_{len(sound)}.wav', format="wav")
+                        if not os.path.exists(path_to_splitted_audio+path_delim+player_number+'_'+name[:-4]+ f'_{i}_{len(sound)}.wav'):
+                            cut.export(path_to_splitted_audio+path_delim+player_number+'_'+name[:-4]+ f'_{i}_{len(sound)}.wav', format="wav")
                         break
                     cut = sound[i:i+3000]
-                    if not os.path.exists(path_to_splitted_audio+'/'+player_number+'_'+name[:-4]+ f'_{i}_{i+3000}.wav'):
-                        cut.export(path_to_splitted_audio+'/'+player_number+'_'+name[:-4]+ f'_{i}_{i+3000}.wav', format="wav")
+                    if not os.path.exists(path_to_splitted_audio+path_delim+player_number+'_'+name[:-4]+ f'_{i}_{i+3000}.wav'):
+                        cut.export(path_to_splitted_audio+path_delim+player_number+'_'+name[:-4]+ f'_{i}_{i+3000}.wav', format="wav")
                     i+=3000
 
 def get_dict_with_emotions(file_path): #keys: match -> n_round -> num_player value: dataframe
     all_emt_dict={}
     col_emt_names=["start", "end", "emt_est_1", "str_emt_est_1", "emt_est_2", "str_emt_est_2", "emt_est_3", "str_emt_est_3"]
-    for n_match in range(4):
+    for n_match, rounds_in_match in match_len.items():
         match_emt_cl={}
-        for n_round in range(1,match_len[n_match+1]+1):
-
+        for n_round in range(1, rounds_in_match + 1):
             players_emt={}
             res_emt={}
-            for num_player in range(10):
-                if glob.glob(file_path+f'/{num_player}_match{n_match+1}_round{n_round}.csv'):
-                    str_path=glob.glob(file_path+f'/{num_player}_match{n_match+1}_round{n_round}.csv')[0]
-                    df_s = pd.read_csv(str_path,names=col_emt_names)
+            for num_player in range(amt_of_players):
+                if glob.glob(file_path + path_delim + f'{num_player}_match{n_match}_round{n_round}.csv'):
+                    str_path=glob.glob(file_path + path_delim + f'{num_player}_match{n_match}_round{n_round}.csv')[0]
+                    try:
+                        df_s = pd.read_csv(str_path,names=col_emt_names)
+                    except UnicodeDecodeError:
+                        if platform.system() == 'Windows':
+                            os.system("notepad " + str_path)
+                        else:
+                            os.system("nano " + str_path)                            
+                        df_s = pd.read_csv(str_path,names=col_emt_names)
                     res_emt[num_player]=df_s
 
             match_emt_cl[n_round]=res_emt
@@ -130,11 +141,13 @@ def find_majority(est_with_str):
     strength=[i[1] for i in est_with_str]
     vote_count = Counter(votes)
     most_ = vote_count.most_common(1)
-    if (most_[0][1]>=2)and(most_[0][0]>0):
+    if (most_[0][1]>= 2) and (most_[0][0] > 0):
         ids = [ind for ind in range(len(votes)) if votes[ind] == most_[0][0]]
         mean_str = round(np.array([strength[i] for i in ids]).mean(),1)
-        return [most_[0][0],mean_str]
+        return [most_[0][0], mean_str]
     else:
+        if (most_[0][0] == 0) and (most_[0][1] == 2):
+            return [max(votes), max(strength)]
         return [-1,-1]
 
 def get_emotions(df): 
@@ -146,7 +159,6 @@ def get_emotions(df):
     ss=[]
     for i in player_emt[['est_1','est_2','est_3']].values:
         ss.append(find_majority(i))
-
     player_emt['emt']=np.asarray(ss)[:,0]
     player_emt['emt'] = player_emt['emt'].apply(int)
     player_emt['str_emt']=np.asarray(ss)[:,1]
@@ -161,9 +173,9 @@ def convert_dict(all_emt_dict):
     for key in emotion_with_keys.keys():
         full_emt[key]=[]
     
-    for n_match in range(4):
-        for n_round in range(match_len[n_match+1]+1):
-            for n_player in range(10):
+    for n_match, rounds_in_match in match_len.items():
+        for n_round in range(1, rounds_in_match + 1):
+            for n_player in range(amt_of_players):
                 if all_emt_dict.get(n_match) is not None and \
                    all_emt_dict.get(n_match).get(n_round) is not None and \
                    all_emt_dict.get(n_match).get(n_round).get(n_player) is not None:
@@ -184,10 +196,10 @@ def split_annotations(full_emt,path_to_audio,test_size=0.2):
         for vals in values:
             n_player,n_match,n_round,list_start_time=vals
             for start_time in list_start_time:
-                file = glob.glob(path_to_audio+f'/{n_player}_match{n_match+1}_round{n_round}_{start_time}*.wav')
+                file = glob.glob(path_to_audio + path_delim + f'{n_player}_match{n_match}_round{n_round}_{start_time}*.wav')
                 X.append(file[0])
                 y.append(key_emt)
-                info.append([n_player,n_match+1,n_round,start_time])
+                info.append([n_player,n_match,n_round,start_time])
                 
     #не учитываем "стыд"       
     ind_to_del = y.index(9)
@@ -386,9 +398,3 @@ def get_train_test(file_path,path_to_audio,path_to_splitted_audio,test_size,use_
         print('Prepate test dataset')
         x_test,y_test = get_data(val_list)
         return x_train,y_train,x_test,y_test
-
-
-
-
-
-
