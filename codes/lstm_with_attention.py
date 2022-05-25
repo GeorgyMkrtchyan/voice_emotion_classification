@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import torchaudio
 import typing as tp
+import opensmile
 
-from methodtools import lru_cache
 from tqdm.notebook import tqdm
 from .base import BaseClassificationModel
 from .data_prep import BaseCustomDataset
@@ -83,40 +83,42 @@ class FeatureAttention(nn.Module):
 
 
 class AttentionLSTM_Dataset(BaseCustomDataset):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, num_workers=2, **kwargs):
         super().__init__(*args, **kwargs)
-        for path, *rest in tqdm(self.data_list):
-            self.extract_features(path)
 
-    @lru_cache(None)
-    @staticmethod
-    def extract_features(path):
-        x = AttentionLSTM_Dataset.load_wav(path)
-        voiceProb = None
-        HNR = None
-        F0 = None
-        F0raw = None
-        F0env = None
-        jitterLocal = None
-        jitterDDP = None
-        shimmerLocal = None
-        harmonicERMS = None
-        noiseERMS = None
-        pcm_loudness_sma = None
-        pcm_loudness_sma_de = None #librosa.feature.delta(pcm_loudness_sma)
-        mfcc_sma = librosa.feature.mfcc(x,n_mfcc=15)
-        mfcc_sma_de = librosa.feature.delta(mfcc_sma)
-        pcm_Mag = librosa.feature.melspectrogram(x, n_mels=26)
-        logMelFreqBand = None
-        lpcCoeff = None
-        pcm_zcr = librosa.feature.zero_crossing_rate(x)
-        
-        return torch.tensor(np.concatenate([
-                    mfcc_sma,
-                    mfcc_sma_de,
-                    pcm_Mag,
-                    pcm_zcr
-                ], axis=-2)).float().transpose(-1,-2)
+        self.smile = opensmile.Smile(
+            feature_set=opensmile.FeatureSet.ComParE_2016,
+            feature_level=opensmile.FeatureLevel.LowLevelDescriptors,
+            num_workers=num_workers
+        )
+        self.smile_de = opensmile.Smile(
+            feature_set=opensmile.FeatureSet.ComParE_2016,
+            feature_level=opensmile.FeatureLevel.LowLevelDescriptors_Deltas,
+            num_workers=num_workers
+        )
+
+        self.features = {}
+        mode = "val" if len(self) < 3000 else "train"
+        try:
+            with open(f"ComParE_2016_{mode}.npz", "rb") as file:
+                features_lst = np.load(file)["arr_0"]
+        except FileNotFoundError:
+            features_lst = np.stack([self.extract_features(path) for path, _, _ in tqdm(self.data_list)], 0)
+            with open(f"ComParE_2016_{mode}.npz", "wb") as file:
+                np.savez(file, features_lst)
+        self.features = {path:feature for (path, _, _), feature in zip(self.data_list, features_lst)}
+
+
+    def extract_features(self, path):
+        outs = self.features.get(path, None)
+        if outs is None:
+            x = self.load_wav(path)
+            features = torch.tensor(self.smile.process_signal(x, self.sampling_rate).to_numpy())
+            features_de = torch.tensor(self.smile_de.process_signal(x, self.sampling_rate).to_numpy()[:-2])
+            return torch.cat([features, features_de], 1)
+        else:
+            return outs
+
 
 
 class AttentionLSTM_Classifier(BaseClassificationModel):

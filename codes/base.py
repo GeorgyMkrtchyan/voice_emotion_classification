@@ -74,6 +74,7 @@ def train(model:pl.LightningModule, train_dataloader, val_dataloader, max_epochs
     checkpoint_path = os.path.join(log_dir, "checkpoints")
     checkpoint_callback = ModelCheckpoint(checkpoint_path,
                                           monitor="val_F1",
+                                          mode="max",
                                           filename="{epoch}-{val_F1}")
     logger = TensorBoardLogger(log_dir)
     trainer = pl.Trainer(logger=logger,

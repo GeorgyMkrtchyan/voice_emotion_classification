@@ -13,10 +13,10 @@ from torch.utils.data import Dataset, DataLoader
 import torch
 import time
 from functools import lru_cache
+import json
+from tqdm.notebook import tqdm
 
 from . import demo_analysis_new
-
-NUM_WORKERS=2
 
 match_len={
     1:4,
@@ -191,7 +191,7 @@ def split_annotations(full_emt,path_to_audio,test_size=0.2):
                 file = glob.glob(path_to_audio+f'/{n_player}_match{n_match+1}_round{n_round}_{start_time}*.wav')
                 X.append(file[0])
                 y.append(key_emt)
-                info.append([n_player,n_match+1,n_round,start_time])
+                info.append([n_player,n_match+1,n_round,int(start_time)])
                 
     #не учитываем "стыд"       
     ind_to_del = y.index(9)
@@ -283,7 +283,7 @@ def get_context_vector(n_player,n_match,n_round,start_time):
 
 class BaseCustomDataset(Dataset):
 
-    def __init__(self, data_list,use_game_context):
+    def __init__(self, data_list,use_game_context, **ignored_kwargs):
         self.data_list = data_list
         self.use_game_context = bool(use_game_context)
         self.sampling_rate = 22050
@@ -291,8 +291,8 @@ class BaseCustomDataset(Dataset):
         if self.use_game_context:
             print("Preparing game context vectors")
             start = time.time()
-            for item in self.data_list:
-                get_context_vector(*item[2])
+            for _, _, info in tqdm(self.data_list):
+                get_context_vector(*info)
             print(f"Finished in {(time.time() - start)/60:.2f} minutes")
 
     def __len__(self):
@@ -305,10 +305,9 @@ class BaseCustomDataset(Dataset):
             offset = sr*3 - sound_1d_array.shape[-1] 
             sound_1d_array = np.pad(sound_1d_array, (0, offset)) 
         return sound_1d_array  
-          
-    @staticmethod
-    def extract_features(path):
-        x = BaseCustomDataset.load_wav(path)
+
+    def extract_features(self, path):
+        x = self.load_wav(path)
         return torch.tensor(x)
 
     def __getitem__(self, index):
@@ -323,7 +322,6 @@ class BaseCustomDataset(Dataset):
         return x, ctx, y
 
 
-@lru_cache(None)
 def prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size):
     if not os.path.exists(path_to_splitted_audio):
         print('Start splitting audio to ',path_to_splitted_audio)
@@ -332,15 +330,24 @@ def prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size):
         print('Finish splitting\n')
     else:
         print(f"{path_to_splitted_audio} exists; skip splitting")
-    full_dict_with_emt = convert_dict(get_dict_with_emotions(file_path))
-    print('Emotion statistic:')
-    display_emt(full_dict_with_emt)
-    print('\nPrepare train and val lists')
-    start = time.time()
-    train_list, val_list = split_annotations(full_dict_with_emt,path_to_splitted_audio,test_size)
-    print("It took: ", round((time.time()-start)/60,2)," minutes")
-    print ('train size: ', len(train_list))
-    print ('val size: ', len(val_list))
+    try:
+        with open("prepared.json", "r") as file:
+            train_list, val_list = json.load(file)
+    except:
+        full_dict_with_emt = convert_dict(get_dict_with_emotions(file_path))
+        print('Emotion statistic:')
+        display_emt(full_dict_with_emt)
+        print('\nPrepare train and val lists')
+        start = time.time()
+        train_list, val_list = split_annotations(full_dict_with_emt,path_to_splitted_audio,test_size)
+        print("It took: ", round((time.time()-start)/60,2)," minutes")
+        print ('train size: ', len(train_list))
+        print ('val size: ', len(val_list))
+        try:
+            with open("prepared.json", "w") as file:
+                json.dump([train_list, val_list], file)
+        except: print("pff")
+       
     return train_list, val_list
 
 
@@ -349,21 +356,22 @@ def get_dataloader(file_path, path_to_audio, path_to_splitted_audio,
                    test_size,
                    use_game_context=False,
                    batch_size=32,
-                   DatasetClass=BaseCustomDataset):
+                   DatasetClass=BaseCustomDataset,
+                   num_workers=2):
   
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
     print('\nPrepate train dataset')
-    train_dataset = DatasetClass(train_list,use_game_context=use_game_context)
+    train_dataset = DatasetClass(train_list,use_game_context=use_game_context, num_workers=num_workers)
     print('Prepate val dataset')
-    val_dataset = DatasetClass(val_list,use_game_context=use_game_context)
+    val_dataset = DatasetClass(val_list,use_game_context=use_game_context, num_workers=num_workers)
 
     train_dataloader=DataLoader(
                 train_dataset, batch_size=batch_size,
-                num_workers=NUM_WORKERS, shuffle=True,pin_memory=True)
+                num_workers=num_workers, shuffle=True,pin_memory=True)
 
     val_dataloader=DataLoader(
                 val_dataset, batch_size=batch_size,
-                num_workers=NUM_WORKERS, shuffle=False,pin_memory=True)
+                num_workers=num_workers, shuffle=False,pin_memory=True)
 
     return train_dataloader,val_dataloader
 
@@ -409,9 +417,3 @@ def get_train_test(file_path,path_to_audio,path_to_splitted_audio,test_size,use_
         print('Prepate test dataset')
         x_test,y_test = get_data(val_list,use_game_context=use_game_context)
         return x_train,y_train,x_test,y_test
-
-
-
-
-
-

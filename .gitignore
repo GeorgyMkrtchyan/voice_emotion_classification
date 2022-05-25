@@ -133,3 +133,6 @@ LCB_*.zip
 LCB_*/
 demos/
 logs/
+*.npz
+*.json
+*.txt
