@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import seaborn as sns
 import math
 from ast import literal_eval
 import collections
@@ -15,6 +16,8 @@ import time
 from functools import lru_cache
 import json
 from tqdm.notebook import tqdm
+
+from scipy.fft import fft, fftfreq, rfft, rfftfreq
 
 from . import demo_analysis_new
 
@@ -42,6 +45,9 @@ emotion_with_keys={
   9:'стыд',
  10:'вина'
 }
+
+SAMPLING_RATE = 22050
+pcs_len_sec = 3
 
 
 @lru_cache(None)
@@ -293,12 +299,12 @@ def get_context_vector(n_player,n_match,n_round,start_time):
 
 
 
-class BaseCustomDataset(Dataset):
+class BaseAudioSignalDataset(Dataset):
 
-    def __init__(self, data_list,use_game_context, **ignored_kwargs):
+    def __init__(self, data_list, use_game_context, sampling_rate=SAMPLING_RATE, **ignored_kwargs):
         self.data_list = data_list
         self.use_game_context = bool(use_game_context)
-        self.sampling_rate = 22050
+        self.sampling_rate = sampling_rate
 
         if self.use_game_context:
             print("Preparing game context vectors")
@@ -310,11 +316,10 @@ class BaseCustomDataset(Dataset):
     def __len__(self):
         return len(self.data_list)
   
-    @staticmethod
-    def load_wav(path):
-        sound_1d_array, sr = librosa.load(path) # load audio to 1d array
-        if sound_1d_array.shape[-1] < sr*3:
-            offset = sr*3 - sound_1d_array.shape[-1] 
+    def load_wav(self, path):
+        sound_1d_array, sr = librosa.load(path, sr=self.sampling_rate) # load audio to 1d array
+        if sound_1d_array.shape[-1] < sr*pcs_len_sec:
+            offset = sr*pcs_len_sec - sound_1d_array.shape[-1] 
             sound_1d_array = np.pad(sound_1d_array, (0, offset)) 
         return sound_1d_array  
 
@@ -333,6 +338,73 @@ class BaseCustomDataset(Dataset):
             ctx = torch.tensor([])
         return x, ctx, y
 
+
+class BaseSpectrogramDataset(BaseAudioSignalDataset):
+
+    def __init__(self, 
+                 data_list, 
+                 use_game_context=True, 
+                 sampling_rate=SAMPLING_RATE,
+                 window_size=512, 
+                 **ignored_kwargs):
+        self.window_size = window_size
+        self.hop_len = self.window_size // 2
+
+        self.window_weights = np.hanning(self.window_size)[:, None]
+        super().__init__(data_list, use_game_context, sampling_rate)
+
+    @staticmethod
+    def __visualize__(spec): 
+        ax = sns.heatmap(spec)
+        ax.invert_yaxis()
+    
+    def extract_features(self, path):
+        _track = self.load_wav(path)
+        spec = self.calculate_all_windows(_track)
+        return torch.tensor(spec)
+
+    def __getitem__(self, index):
+        item=self.data_list[index]
+        x = self.extract_features(item[0])
+        y = item[1] - 1
+        
+        if self.use_game_context:
+            ctx = torch.from_numpy(get_context_vector(*item[2])).float()
+        else:
+            ctx = torch.tensor([])
+        return x, ctx, y
+
+    """
+    For a typical speech recognition task, 
+    a window of 20 to 30ms long is recommended.
+    The overlap can vary from 25% to 75%.
+    it is kept 50% for speech recognition.
+    """
+    def calculate_all_windows(self, audio):
+        
+        truncate_size = (len(audio) - self.window_size) % self.hop_len
+        audio = audio[:len(audio) - truncate_size]
+
+        nshape = (self.window_size, (len(audio) - self.window_size) // self.hop_len + 1)
+        nhops = (audio.strides[0], audio.strides[0] * self.hop_len)
+        
+        windows = np.lib.stride_tricks.as_strided(audio, 
+                                                  shape=nshape, 
+                                                  strides=nhops)
+        
+        assert np.all(windows[:, 1] == audio[self.hop_len:(self.hop_len + self.window_size)])
+
+        yf = np.fft.rfft(windows * self.window_weights, axis=0)
+        yf = np.abs(yf)**2
+
+        scaling_factor = np.sum(self.window_weights**2) * self.sampling_rate
+        yf[1:-1, :] *= (2. / scaling_factor) 
+        yf[(0,-1), :] /= scaling_factor
+
+        xf = float(self.sampling_rate) / self.window_size * np.arange(yf.shape[0])
+
+        indices = np.where(xf <= self.sampling_rate // 2)[0][-1] + 1
+        return np.log(yf[:indices, :] + 1e-16)
 
 def prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size):
     if not os.path.exists(path_to_splitted_audio):
@@ -368,13 +440,13 @@ def get_dataloader(file_path, path_to_audio, path_to_splitted_audio,
                    test_size,
                    use_game_context=False,
                    batch_size=32,
-                   DatasetClass=BaseCustomDataset,
-                   num_workers=2):
+                   DatasetClass=BaseAudioSignalDataset,
+                   num_workers=1):
   
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
-    print('\nPrepate train dataset')
+    print('\nPrepare train dataset')
     train_dataset = DatasetClass(train_list,use_game_context=use_game_context, num_workers=num_workers)
-    print('Prepate val dataset')
+    print('Prepare val dataset')
     val_dataset = DatasetClass(val_list,use_game_context=use_game_context, num_workers=num_workers)
 
     train_dataloader=DataLoader(
@@ -390,7 +462,7 @@ def get_dataloader(file_path, path_to_audio, path_to_splitted_audio,
 #for ML methods
 def get_data(data_list,use_game_context):
 
-    sampling_rate = 22050*3
+    amt_of_samples = sampling_rate*pcs_len_sec
         
     X = []
     Y = []
@@ -399,8 +471,8 @@ def get_data(data_list,use_game_context):
     for item in data_list:
             
             sound_1d_array,_ = librosa.load(item[0])
-            if sound_1d_array.size<sampling_rate:
-                offset = sampling_rate - sound_1d_array.size 
+            if sound_1d_array.size < amt_of_samples:
+                offset = amt_of_samples - sound_1d_array.size 
                 sound_1d_array = np.pad(sound_1d_array, (0, offset))
 
             X.append(sound_1d_array)

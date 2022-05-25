@@ -8,7 +8,7 @@ import opensmile
 
 from tqdm.notebook import tqdm
 from .base import BaseClassificationModel
-from .data_prep import BaseCustomDataset
+from .data_prep import BaseAudioSignalDataset
 
 
 class TimeAttention(nn.Module):
@@ -82,7 +82,7 @@ class FeatureAttention(nn.Module):
         return outs
 
 
-class AttentionLSTM_Dataset(BaseCustomDataset):
+class AttentionLSTM_Dataset(BaseAudioSignalDataset):
     def __init__(self, *args, num_workers=2, **kwargs):
         super().__init__(*args, **kwargs)
 
