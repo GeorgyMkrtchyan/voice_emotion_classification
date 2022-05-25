@@ -5,7 +5,7 @@ import torch.nn as nn
 import torchaudio
 import typing as tp
 
-from functools import lru_cache
+from methodtools import lru_cache
 from tqdm.notebook import tqdm
 from .base import BaseClassificationModel
 from .data_prep import BaseCustomDataset
@@ -88,8 +88,8 @@ class AttentionLSTM_Dataset(BaseCustomDataset):
         for path, *rest in tqdm(self.data_list):
             self.extract_features(path)
 
-    @staticmethod
     @lru_cache(None)
+    @staticmethod
     def extract_features(path):
         x = AttentionLSTM_Dataset.load_wav(path)
         voiceProb = None
