@@ -14,7 +14,7 @@ import torch
 import time
 from functools import lru_cache
 
-import demo_analysis_new
+from . import demo_analysis_new
 
 NUM_WORKERS=2
 
@@ -281,12 +281,12 @@ def get_context_vector(n_player,n_match,n_round,start_time):
 
 
 
-class CustomDataset(Dataset):
+class BaseCustomDataset(Dataset):
 
     def __init__(self, data_list,use_game_context):
         self.data_list = data_list
         self.use_game_context = bool(use_game_context)
-        self.sampling_rate = 22050*3
+        self.sampling_rate = 22050
 
         if self.use_game_context:
             print("Preparing game context vectors")
@@ -298,21 +298,29 @@ class CustomDataset(Dataset):
     def __len__(self):
         return len(self.data_list)
   
+    @staticmethod
+    def load_wav(path):
+        sound_1d_array, sr = librosa.load(path) # load audio to 1d array
+        if sound_1d_array.shape[-1] < sr*3:
+            offset = sr*3 - sound_1d_array.shape[-1] 
+            sound_1d_array = np.pad(sound_1d_array, (0, offset)) 
+        return sound_1d_array  
+          
+    @staticmethod
+    def extract_features(path):
+        x = BaseCustomDataset.load_wav(path)
+        return torch.tensor(x)
+
     def __getitem__(self, index):
         item=self.data_list[index]
-        sound_1d_array,_ = librosa.load(item[0]) # load audio to 1d array
-        if sound_1d_array.size<self.sampling_rate:
-            offset = self.sampling_rate - sound_1d_array.size 
-            sound_1d_array = np.pad(sound_1d_array, (0, offset))
-                
-        x = torch.from_numpy(sound_1d_array).unsqueeze(0)     
-        y = create_onehot_tensor(item[1])
+        x = self.extract_features(item[0])
+        y = item[1] - 1
         
         if self.use_game_context:
             ctx = torch.from_numpy(get_context_vector(*item[2])).float()
-            return x, ctx, y
-        
-        return x,y
+        else:
+            ctx = torch.tensor([])
+        return x, ctx, y
 
 
 @lru_cache(None)
@@ -337,13 +345,17 @@ def prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size):
 
 
 
-def get_dataloader(file_path,path_to_audio,path_to_splitted_audio,test_size,use_game_context=False,batch_size=32):
+def get_dataloader(file_path, path_to_audio, path_to_splitted_audio,
+                   test_size,
+                   use_game_context=False,
+                   batch_size=32,
+                   DatasetClass=BaseCustomDataset):
   
     train_list, val_list = prepare_data(file_path,path_to_audio,path_to_splitted_audio,test_size)
     print('\nPrepate train dataset')
-    train_dataset = CustomDataset(train_list,use_game_context=use_game_context)
+    train_dataset = DatasetClass(train_list,use_game_context=use_game_context)
     print('Prepate val dataset')
-    val_dataset = CustomDataset(val_list,use_game_context=use_game_context)
+    val_dataset = DatasetClass(val_list,use_game_context=use_game_context)
 
     train_dataloader=DataLoader(
                 train_dataset, batch_size=batch_size,

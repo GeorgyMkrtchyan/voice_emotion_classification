@@ -132,3 +132,4 @@ dmypy.json
 LCB_*.zip
 LCB_*/
 demos/
+logs/
