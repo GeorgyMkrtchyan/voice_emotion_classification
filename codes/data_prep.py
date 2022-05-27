@@ -301,10 +301,13 @@ def get_context_vector(n_player,n_match,n_round,start_time):
 
 class BaseAudioSignalDataset(Dataset):
 
-    def __init__(self, data_list, use_game_context, sampling_rate=SAMPLING_RATE, **ignored_kwargs):
+    def __init__(self, data_list, use_game_context, sampling_rate=SAMPLING_RATE, normalise=False, augment=False, augment_type='noise', **ignored_kwargs):
         self.data_list = data_list
         self.use_game_context = bool(use_game_context)
         self.sampling_rate = sampling_rate
+        self.normalise = normalise
+        self.augment = augment
+        self.augment_type = augment_type
 
         if self.use_game_context:
             print("Preparing game context vectors")
@@ -318,10 +321,37 @@ class BaseAudioSignalDataset(Dataset):
   
     def load_wav(self, path):
         sound_1d_array, sr = librosa.load(path, sr=self.sampling_rate) # load audio to 1d array
+        if self.normalise: #mean normalisation
+            sound_1d_array = sound_1d_array - np.mean(sound_1d_array)
+
+        if self.augment:
+            sound_1d_array = self.augment_data(sound_1d_array, mode=self.augment_type, sr=sr)
+
+
         if sound_1d_array.shape[-1] < sr*pcs_len_sec:
             offset = sr*pcs_len_sec - sound_1d_array.shape[-1] 
             sound_1d_array = np.pad(sound_1d_array, (0, offset)) 
-        return sound_1d_array  
+        return sound_1d_array
+
+    def augment_data(self, sample, mode='noise', sr=None):
+        if mode =='noise':
+            y_noise = sample.copy()
+            noise_amp = 0.005*np.random.uniform()*np.amax(y_noise)
+            augmented = y_noise.astype('float64') + noise_amp * np.random.normal(size=y_noise.shape[0])
+        elif mode == 'pitch':
+            y_pitch = sample.copy()
+            bins_per_octave = 12
+            pitch_pm = 2
+            pitch_change = pitch_pm * 2*(np.random.uniform())
+            augmented = librosa.effects.pitch_shift(y_pitch.astype('float64'),
+                                      sr, n_steps=pitch_change,
+                                      bins_per_octave=bins_per_octave)
+        elif mode == None:
+            augmented = sample
+        else:
+            raise NotImplemented(f"Augmentation type {mode} isn't implemented")
+
+        return augmented
 
     def extract_features(self, path):
         x = self.load_wav(path)
@@ -357,11 +387,17 @@ class BaseSpectrogramDataset(BaseAudioSignalDataset):
     def __visualize__(spec): 
         ax = sns.heatmap(spec)
         ax.invert_yaxis()
-    
+
     def extract_features(self, path):
         _track = self.load_wav(path)
         spec = self.calculate_all_windows(_track)
-        return torch.tensor(spec)
+        img = self.mapping_to_img(spec)
+        return torch.tensor(img)
+
+    @staticmethod
+    def mapping_to_img(spectrum):
+        maxval = np.min(spectrum) if np.abs(np.min(spectrum)) > np.abs(np.max(spectrum)) else np.max(spectrum)
+        return 255*spectrum/maxval
 
     def __getitem__(self, index):
         item=self.data_list[index]
